@@ -1,0 +1,155 @@
+version: '3.8'
+
+services:
+  # Base de datos PostgreSQL 17
+  postgres:
+    image: postgres:17
+    container_name: finsmart-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: finsmart
+      POSTGRES_USER: finsmart_user
+      POSTGRES_PASSWORD: finsmart_password
+    ports:
+      - "5342:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./Backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - finsmart-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finsmart_user -d finsmart"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Modelo Ollama con Llama 3.2
+  ollama:
+    image: ollama/ollama:latest
+    container_name: finsmart-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - finsmart-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Descargar modelo automáticamente al iniciar
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        sleep 5
+        ollama pull llama3.2
+        wait
+
+  # Servicio de IA
+  ia-service:
+    build:
+      context: ./IA
+      dockerfile: Dockerfile
+    container_name: finsmart-ia
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      DATABASE_URL: postgresql://finsmart_user:finsmart_password@postgres:5432/finsmart
+    ports:
+      - "8001:8001"
+    depends_on:
+      ollama:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks:
+      - finsmart-network
+    volumes:
+      - ./IA:/app
+      - ia_cache:/app/cache
+
+  # Backend (API)
+  backend:
+    build:
+      context: ./Backend
+      dockerfile: Dockerfile
+    container_name: finsmart-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://finsmart_user:finsmart_password@postgres:5432/finsmart
+      IA_SERVICE_URL: http://ia-service:8001
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      JWT_SECRET: ${JWT_SECRET:-your-secret-key-change-in-production}
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ia-service:
+        condition: service_started
+    networks:
+      - finsmart-network
+    volumes:
+      - ./Backend:/app
+      - backend_uploads:/app/uploads
+
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./Frontend
+      dockerfile: Dockerfile
+    container_name: finsmart-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - finsmart-network
+    volumes:
+      - ./Frontend:/app
+      - /app/node_modules
+      - /app/.next
+
+  # Bot de Telegram (POC)
+  telegram-bot:
+    build:
+      context: ./POC
+      dockerfile: Dockerfile
+    container_name: finsmart-telegram-bot
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      BOT_USERNAME: ${BOT_USERNAME}
+      API_BASE_URL: http://backend:8000
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      - backend
+      - ollama
+    networks:
+      - finsmart-network
+    volumes:
+      - ./POC:/app
+
+networks:
+  finsmart-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  ollama_data:
+    driver: local
+  ia_cache:
+    driver: local
+  backend_uploads:
+    driver: local
