@@ -1,22 +1,59 @@
-# Dockerfile principal para FinSmart
-# Este archivo sirve como referencia. Usa docker-compose.yml para orquestar todos los servicios.
+# Dockerfile para Frontend de FinSmart (Next.js)
 
-# Para construir y ejecutar todos los servicios:
-# docker-compose up -d
+# Etapa 1: Dependencias
+FROM node:20-alpine AS deps
+WORKDIR /app
 
-# Para detener todos los servicios:
-# docker-compose down
+# Copiar archivos de dependencias
+COPY package.json pnpm-lock.yaml* ./
 
-# Para ver logs:
-# docker-compose logs -f
+# Instalar pnpm
+RUN npm install -g pnpm
 
-# Para reconstruir después de cambios:
-# docker-compose up -d --build
+# Instalar dependencias
+RUN pnpm install --frozen-lockfile
 
-# Servicios incluidos:
-# - PostgreSQL 17 (puerto 5342)
-# - Ollama con Llama 3.2 (puerto 11434)
-# - Servicio de IA (puerto 8001)
-# - Backend API (puerto 8000)
-# - Frontend Next.js (puerto 3000)
-# - Bot de Telegram
+# Etapa 2: Builder
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Copiar dependencias desde la etapa anterior
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Instalar pnpm
+RUN npm install -g pnpm
+
+# Deshabilitar telemetría de Next.js
+ENV NEXT_TELEMETRY_DISABLED 1
+
+# Construir la aplicación
+RUN pnpm build
+
+# Etapa 3: Runner
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV production
+ENV NEXT_TELEMETRY_DISABLED 1
+
+# Crear usuario no root
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Copiar archivos necesarios
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+
+# Cambiar permisos
+RUN chown -R nextjs:nodejs /app
+
+USER nextjs
+
+EXPOSE 3000
+
+ENV PORT 3000
+ENV HOSTNAME "0.0.0.0"
+
+CMD ["node", "server.js"]
